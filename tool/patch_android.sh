@@ -32,3 +32,16 @@ android.injected.signing.store.password=$PASS
 android.injected.signing.key.alias=pdichats
 android.injected.signing.key.password=$PASS
 EOF
+
+# Build here once so any error is saved to a release called "build-log".
+set +e
+flutter pub get > /tmp/build.log 2>&1
+flutter build apk --release >> /tmp/build.log 2>&1
+rc=$?
+set -e
+gh release delete build-log --cleanup-tag -y >/dev/null 2>&1 || true
+if [ $rc -ne 0 ]; then
+  { grep -nE "error|Error|FAILURE|went wrong|Could not|Execution failed|Because" /tmp/build.log | head -n 60; echo "----- tail -----"; tail -n 50 /tmp/build.log; } > /tmp/err.log
+  gh release create build-log --title "build log" --notes-file /tmp/err.log
+  exit 1
+fi
