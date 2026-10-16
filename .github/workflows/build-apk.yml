@@ -1,0 +1,39 @@
+name: Build APK
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - '.github/workflows/build-apk.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Build APK
+        working-directory: app
+        run: |
+          flutter create --platforms=android --org com.pdi --project-name pdi_chats .
+          M=android/app/src/main/AndroidManifest.xml
+          sed -i 's#<manifest xmlns:android="http://schemas.android.com/apk/res/android">#&\n    <uses-permission android:name="android.permission.INTERNET"/>#' $M
+          sed -i 's#android:label="[^"]*"#android:label="PDI CHATS"#' $M
+          grep -q 'android.permission.INTERNET' $M
+          flutter pub get
+          flutter build apk --release
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete pdi-chats-latest --cleanup-tag -y || true
+          gh release create pdi-chats-latest app/build/app/outputs/flutter-apk/app-release.apk --title "PDI CHATS" --notes "Latest build"
