@@ -14,6 +14,20 @@ for f in android/app/build.gradle.kts android/app/build.gradle; do
   fi
 done
 
+# Some plugins are compiled against an older Android API than the libraries they use need.
+# Force every plugin module to compile against API 36.
+mkdir -p "$HOME/.gradle/init.d"
+cat > "$HOME/.gradle/init.d/force-compilesdk.gradle" <<'EOF'
+gradle.beforeProject { p ->
+    p.afterEvaluate {
+        def ext = p.extensions.findByName('android')
+        if (ext != null) {
+            ext.compileSdkVersion(36)
+        }
+    }
+}
+EOF
+
 # Fixed signing key, so new versions install over the old one.
 KS="$PWD/android/app/release.keystore"
 PASS="pdichats-sign-2026"
