@@ -39,23 +39,33 @@ else
   gh release create pdi-keystore "$KS" --title "signing key" --notes "Do not delete. Keeps app updates installable."
 fi
 
-echo >> android/gradle.properties
-cat >> android/gradle.properties <<EOF
-android.injected.signing.store.file=$KS
-android.injected.signing.store.password=$PASS
-android.injected.signing.key.alias=pdichats
-android.injected.signing.key.password=$PASS
-EOF
+# Release signing config written straight into the app's gradle file.
+G=android/app/build.gradle.kts
+if [ -f "$G" ]; then
+  sed -i 's/signingConfig = signingConfigs.getByName("debug")/signingConfig = signingConfigs.getByName("pdi")/' "$G"
+  sed -i '0,/buildTypes {/s//signingConfigs {\n        create("pdi") {\n            storeFile = file("release.keystore")\n            storePassword = "PASSPLACE"\n            keyAlias = "pdichats"\n            keyPassword = "PASSPLACE"\n        }\n    }\n\n    buildTypes {/' "$G"
+  sed -i "s/PASSPLACE/$PASS/g" "$G"
+fi
 
-# Build here once so any error is saved to a release called "build-log".
+# Build here once. Result + signature check are saved to a release called "build-log".
 set +e
 flutter pub get > /tmp/build.log 2>&1
 flutter build apk --release >> /tmp/build.log 2>&1
 rc=$?
 set -e
+APK=build/app/outputs/flutter-apk/app-release.apk
+{
+  echo "build exit code: $rc"
+  echo "signing patched: $(grep -c 'getByName("pdi")' "$G" 2>/dev/null || echo 0)"
+  ls -l "$APK" 2>&1 || true
+  AS=$(ls -d "${ANDROID_HOME:-/usr/local/lib/android/sdk}"/build-tools/*/apksigner 2>/dev/null | tail -n 1)
+  if [ -n "$AS" ] && [ -f "$APK" ]; then "$AS" verify --verbose --print-certs "$APK" 2>&1 | head -n 25; fi
+  if [ $rc -ne 0 ]; then
+    grep -nE "error|Error|FAILURE|went wrong|Could not|Execution failed|Because" /tmp/build.log | head -n 40
+    echo "----- tail -----"
+    tail -n 40 /tmp/build.log
+  fi
+} > /tmp/err.log 2>&1
 gh release delete build-log --cleanup-tag -y >/dev/null 2>&1 || true
-if [ $rc -ne 0 ]; then
-  { grep -nE "error|Error|FAILURE|went wrong|Could not|Execution failed|Because" /tmp/build.log | head -n 60; echo "----- tail -----"; tail -n 50 /tmp/build.log; } > /tmp/err.log
-  gh release create build-log --title "build log" --notes-file /tmp/err.log
-  exit 1
-fi
+gh release create build-log --title "build log" --notes-file /tmp/err.log
+if [ $rc -ne 0 ]; then exit 1; fi
