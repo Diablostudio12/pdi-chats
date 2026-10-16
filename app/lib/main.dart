@@ -14,6 +14,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
+import 'groups.dart';
 
 const kUrl = 'https://jmmwvitwcrcpfxpeuuvm.supabase.co';
 const kKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImptbXd2aXR3Y3JjcGZ4cGV1dXZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTIxMTc2ODIsImV4cCI6MjEwNzY5MzY4Mn0.16bDDptai93FmPw3fmkiLAjJ64l3HMloRq-VEfy1WOw';
@@ -80,17 +81,68 @@ void toast(BuildContext c, String m) {
   ScaffoldMessenger.of(c).showSnackBar(SnackBar(content: Text(m)));
 }
 
+String errText(Object e) => e is PostgrestException ? e.message : 'Kuch gadbad hui, dobara try karo';
+
+int roleRank(String r) {
+  switch (r) {
+    case 'owner':
+      return 100;
+    case 'admin':
+      return 80;
+    case 'head':
+      return 70;
+    case 'manager':
+      return 60;
+    case 'casting_director':
+    case 'editor':
+      return 40;
+    default:
+      return 10;
+  }
+}
+
+String roleLabel(String r) {
+  switch (r) {
+    case 'owner':
+      return 'Owner';
+    case 'admin':
+      return 'Admin';
+    case 'head':
+      return 'Head';
+    case 'manager':
+      return 'Manager';
+    case 'casting_director':
+      return 'Casting Director';
+    case 'editor':
+      return 'Editor';
+    default:
+      return '';
+  }
+}
+
+Color nameColor(String s) {
+  const cols = [
+    Color(0xFFE8C07D),
+    Color(0xFF9AD0C2),
+    Color(0xFFC9A0DC),
+    Color(0xFF8FB8DE),
+    Color(0xFFE59A9A),
+    Color(0xFFB5D99C),
+  ];
+  return cols[s.hashCode.abs() % cols.length];
+}
+
 String previewMsg(Map<String, dynamic> m) {
   if (m['deleted'] == true) return 'Message delete kiya gaya';
   switch ((m['kind'] ?? 'text').toString()) {
     case 'image':
-      return '📷 Photo';
+      return '\ud83d\udcf7 Photo';
     case 'video':
-      return '🎥 Video';
+      return '\ud83c\udfa5 Video';
     case 'voice':
-      return '🎤 Voice message';
+      return '\ud83c\udfa4 Voice message';
     case 'file':
-      return '📄 ${m['media_name'] ?? 'File'}';
+      return '\ud83d\udcc4 ${m['media_name'] ?? 'File'}';
     default:
       return (m['body'] ?? '').toString();
   }
@@ -107,11 +159,20 @@ Future<String> uploadFile(File f, String name) async {
   return sb.storage.from('media').getPublicUrl(path);
 }
 
-Future<void> insertMessage(String to,
-    {String body = '', String kind = 'text', String? url, String? mname, int? msize, int? dur, int? replyTo, bool fwd = false}) async {
+Future<void> insertMessage(String? to,
+    {String? convId,
+    String body = '',
+    String kind = 'text',
+    String? url,
+    String? mname,
+    int? msize,
+    int? dur,
+    int? replyTo,
+    bool fwd = false}) async {
   await sb.from('messages').insert({
     'sender': sb.auth.currentUser!.id,
     'receiver': to,
+    'conv_id': convId,
     'body': body,
     'kind': kind,
     'media_url': url,
@@ -465,8 +526,8 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeState extends State<HomeScreen> {
-  List<Map<String, dynamic>> chats = [];
-  bool unreadOnly = false;
+  List<Map<String, dynamic>> chats = [], convs = [];
+  String filter = 'all';
   Timer? t;
   String get myName => (sb.auth.currentUser?.email ?? '').split('@').first;
 
@@ -489,9 +550,14 @@ class _HomeState extends State<HomeScreen> {
   Future<void> load() async {
     try {
       await sb.rpc('mark_delivered');
+    } catch (_) {}
+    try {
       final d = await sb.rpc('my_chats');
-      if (!mounted) return;
-      setState(() => chats = List<Map<String, dynamic>>.from((d as List).map((e) => Map<String, dynamic>.from(e))));
+      if (mounted) setState(() => chats = List<Map<String, dynamic>>.from((d as List).map((e) => Map<String, dynamic>.from(e))));
+    } catch (_) {}
+    try {
+      final d = await sb.rpc('my_convs');
+      if (mounted) setState(() => convs = List<Map<String, dynamic>>.from((d as List).map((e) => Map<String, dynamic>.from(e))));
     } catch (_) {}
   }
 
@@ -500,27 +566,80 @@ class _HomeState extends State<HomeScreen> {
     load();
   }
 
-  Widget chip(String label, bool on, VoidCallback f) => Padding(
-        padding: const EdgeInsets.only(right: 10),
-        child: GestureDetector(
-          onTap: f,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 9),
-            decoration: BoxDecoration(color: on ? vanilla : slate, borderRadius: BorderRadius.circular(30)),
-            child: Text(label, style: TextStyle(color: on ? ink : mist, fontWeight: on ? FontWeight.w700 : FontWeight.w500)),
-          ),
-        ),
+  Future<void> openCreate(String type) async {
+    await Navigator.push(context, MaterialPageRoute(builder: (_) => CreateConvScreen(type: type)));
+    load();
+  }
+
+  Widget menuTile(BuildContext ctx, IconData i, String title, VoidCallback f) => ListTile(
+        leading: Icon(i),
+        title: Text(title),
+        onTap: () {
+          Navigator.pop(ctx);
+          f();
+        },
       );
+
+  void newMenu() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: slate,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            menuTile(ctx, Icons.chat, 'Nayi chat', openSearch),
+            menuTile(ctx, Icons.group_add, 'Naya group', () => openCreate('group')),
+            menuTile(ctx, Icons.campaign, 'Nayi community', () => openCreate('community')),
+            menuTile(ctx, Icons.vpn_key, 'Code se join karo', () => joinWithCode(context)),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Widget chip(String label, String key) {
+    final on = filter == key;
+    return Padding(
+      padding: const EdgeInsets.only(right: 10),
+      child: GestureDetector(
+        onTap: () => setState(() => filter = key),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 9),
+          decoration: BoxDecoration(color: on ? vanilla : slate, borderRadius: BorderRadius.circular(30)),
+          child: Text(label, style: TextStyle(color: on ? ink : mist, fontWeight: on ? FontWeight.w700 : FontWeight.w500)),
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
-    final shown = unreadOnly ? chats.where((c) => ((c['unread'] ?? 0) as int) > 0).toList() : chats;
+    final all = <Map<String, dynamic>>[
+      for (final c in chats) {...c, '_conv': false},
+      for (final c in convs) {...c, '_conv': true},
+    ];
+    all.sort((a, b) => DateTime.parse(b['last_at'].toString()).compareTo(DateTime.parse(a['last_at'].toString())));
+    final shown = all.where((c) {
+      final unread = (c['unread'] ?? 0) as int;
+      switch (filter) {
+        case 'unread':
+          return unread > 0;
+        case 'groups':
+          return c['_conv'] == true && c['type'] == 'group';
+        case 'communities':
+          return c['_conv'] == true && c['type'] == 'community';
+        default:
+          return true;
+      }
+    }).toList();
     return Scaffold(
       floatingActionButton: FloatingActionButton(
         backgroundColor: vanilla,
         foregroundColor: ink,
         shape: const CircleBorder(),
-        onPressed: openSearch,
+        onPressed: newMenu,
         child: const Icon(Icons.add, size: 28),
       ),
       body: WallBg(
@@ -556,11 +675,16 @@ class _HomeState extends State<HomeScreen> {
               ]),
             ),
             Padding(
-              padding: const EdgeInsets.fromLTRB(22, 12, 22, 8),
-              child: Row(children: [
-                chip('Sab', !unreadOnly, () => setState(() => unreadOnly = false)),
-                chip('Unread', unreadOnly, () => setState(() => unreadOnly = true)),
-              ]),
+              padding: const EdgeInsets.fromLTRB(22, 12, 0, 8),
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(children: [
+                  chip('Sab', 'all'),
+                  chip('Unread', 'unread'),
+                  chip('Groups', 'groups'),
+                  chip('Communities', 'communities'),
+                ]),
+              ),
             ),
             Expanded(
               child: shown.isEmpty
@@ -568,16 +692,16 @@ class _HomeState extends State<HomeScreen> {
                       child: Padding(
                         padding: EdgeInsets.all(32),
                         child: Column(mainAxisSize: MainAxisSize.min, children: [
-                          Text('Abhi koi chat nahi.', style: TextStyle(color: mist, fontSize: 15)),
+                          Text('Yaha abhi kuch nahi.', style: TextStyle(color: mist, fontSize: 15)),
                           SizedBox(height: 4),
-                          Text('+ dabake kisi ko username se dhundo.', textAlign: TextAlign.center, style: TextStyle(color: mist, fontSize: 15)),
+                          Text('+ dabake chat, group ya community shuru karo.', textAlign: TextAlign.center, style: TextStyle(color: mist, fontSize: 15)),
                         ]),
                       ),
                     )
                   : ListView.builder(
                       padding: const EdgeInsets.only(bottom: 100),
                       itemCount: shown.length,
-                      itemBuilder: (_, i) => tile(shown[i]),
+                      itemBuilder: (_, i) => shown[i]['_conv'] == true ? convTile(shown[i]) : tile(shown[i]),
                     ),
             ),
           ]),
@@ -615,6 +739,55 @@ class _HomeState extends State<HomeScreen> {
               Row(children: [
                 if (mine) ...[ticks(c['delivered'] == true, c['seen'] == true), const SizedBox(width: 5)],
                 Expanded(child: Text(previewOf(c), maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 14.5, color: unread > 0 ? const Color(0xFFD9D6B4) : mist))),
+                if (unread > 0)
+                  Container(
+                    margin: const EdgeInsets.only(left: 8),
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(color: vanilla, borderRadius: BorderRadius.circular(20)),
+                    child: Text('$unread', style: const TextStyle(color: ink, fontSize: 12, fontWeight: FontWeight.w700)),
+                  ),
+              ]),
+            ]),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  Widget convTile(Map<String, dynamic> c) {
+    final unread = (c['unread'] ?? 0) as int;
+    final col = unread > 0 ? vanilla : mist;
+    final nm = c['name'].toString();
+    final isComm = c['type'] == 'community';
+    final who = c['last_sender']?.toString();
+    String line;
+    if (c['last_kind'] == null) {
+      line = 'Abhi koi message nahi';
+    } else if (who != null && c['last_deleted'] != true) {
+      line = '$who: ${previewOf(c)}';
+    } else {
+      line = previewOf(c);
+    }
+    return InkWell(
+      onTap: () async {
+        await Navigator.push(context, MaterialPageRoute(builder: (_) => ChatScreen(conv: c)));
+        load();
+      },
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
+        child: Row(children: [
+          Av(nm, url: c['avatar_url']?.toString()),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                if (isComm) ...[Icon(Icons.campaign, size: 17, color: col), const SizedBox(width: 6)],
+                Expanded(child: Text(nm, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: col))),
+                Text(fmtList(c['last_at']), style: TextStyle(fontSize: 12, color: col)),
+              ]),
+              const SizedBox(height: 4),
+              Row(children: [
+                Expanded(child: Text(line, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 14.5, color: unread > 0 ? const Color(0xFFD9D6B4) : mist))),
                 if (unread > 0)
                   Container(
                     margin: const EdgeInsets.only(left: 8),
@@ -748,15 +921,9 @@ class _SearchState extends State<SearchScreen> {
   List<Map<String, dynamic>> res = [];
 
   Future<void> search(String q) async {
-    final s = q.toLowerCase().replaceAll(RegExp(r'[^a-z0-9_]'), '');
-    if (s.isEmpty) {
-      setState(() => res = []);
-      return;
-    }
     try {
-      final d = await sb.from('profiles').select('id,username,name,avatar_url').ilike('username', '$s%').neq('id', sb.auth.currentUser!.id).limit(20);
-      if (!mounted) return;
-      setState(() => res = List<Map<String, dynamic>>.from(d));
+      final r = await searchUsers(q);
+      if (mounted) setState(() => res = r);
     } catch (_) {}
   }
 
@@ -770,22 +937,7 @@ class _SearchState extends State<SearchScreen> {
               padding: const EdgeInsets.fromLTRB(12, 12, 22, 8),
               child: Row(children: [
                 IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.arrow_back)),
-                Expanded(
-                  child: TextField(
-                    autofocus: true,
-                    autocorrect: false,
-                    onChanged: search,
-                    decoration: InputDecoration(
-                      hintText: 'Username likho',
-                      prefixText: '@',
-                      filled: true,
-                      fillColor: slate,
-                      hintStyle: const TextStyle(color: mist),
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(30), borderSide: BorderSide.none),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-                    ),
-                  ),
-                ),
+                Expanded(child: pillField('Username likho', onChanged: search, prefix: '@', autofocus: true)),
               ]),
             ),
             Expanded(
@@ -824,7 +976,7 @@ class ForwardScreen extends StatefulWidget {
 }
 
 class _FwdState extends State<ForwardScreen> {
-  List<Map<String, dynamic>> chats = [];
+  List<Map<String, dynamic>> chats = [], convs = [];
 
   @override
   void initState() {
@@ -835,15 +987,19 @@ class _FwdState extends State<ForwardScreen> {
   Future<void> load() async {
     try {
       final d = await sb.rpc('my_chats');
-      if (!mounted) return;
-      setState(() => chats = List<Map<String, dynamic>>.from((d as List).map((e) => Map<String, dynamic>.from(e))));
+      if (mounted) setState(() => chats = List<Map<String, dynamic>>.from((d as List).map((e) => Map<String, dynamic>.from(e))));
+    } catch (_) {}
+    try {
+      final d = await sb.rpc('my_convs');
+      if (mounted) setState(() => convs = List<Map<String, dynamic>>.from((d as List).map((e) => Map<String, dynamic>.from(e))));
     } catch (_) {}
   }
 
-  Future<void> send(Map<String, dynamic> c) async {
+  Future<void> send({String? peer, String? convId}) async {
     final m = widget.msg;
     try {
-      await insertMessage(c['peer_id'].toString(),
+      await insertMessage(peer,
+          convId: convId,
           body: (m['body'] ?? '').toString(),
           kind: (m['kind'] ?? 'text').toString(),
           url: m['media_url']?.toString(),
@@ -861,24 +1017,33 @@ class _FwdState extends State<ForwardScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final items = <Widget>[];
+    for (final c in chats) {
+      final nm = (c['name'] ?? c['username']).toString();
+      items.add(ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 22, vertical: 4),
+        leading: Av(nm, url: c['avatar_url']?.toString()),
+        title: Text(nm, style: const TextStyle(fontWeight: FontWeight.w700)),
+        subtitle: Text('@${c['username']}', style: const TextStyle(color: mist)),
+        onTap: () => send(peer: c['peer_id'].toString()),
+      ));
+    }
+    for (final c in convs) {
+      if (c['only_admins_post'] == true && roleRank((c['role'] ?? 'member').toString()) < 40) continue;
+      final nm = c['name'].toString();
+      items.add(ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 22, vertical: 4),
+        leading: Av(nm, url: c['avatar_url']?.toString()),
+        title: Text(nm, style: const TextStyle(fontWeight: FontWeight.w700)),
+        subtitle: Text(c['type'] == 'community' ? 'Community' : 'Group', style: const TextStyle(color: mist)),
+        onTap: () => send(convId: c['id'].toString()),
+      ));
+    }
     return Scaffold(
       appBar: AppBar(backgroundColor: ink, title: const Text('Forward karo')),
-      body: chats.isEmpty
+      body: items.isEmpty
           ? const Center(child: Text('Pehle kisi se chat shuru karo', style: TextStyle(color: mist)))
-          : ListView.builder(
-              itemCount: chats.length,
-              itemBuilder: (_, i) {
-                final c = chats[i];
-                final nm = (c['name'] ?? c['username']).toString();
-                return ListTile(
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 22, vertical: 4),
-                  leading: Av(nm, url: c['avatar_url']?.toString()),
-                  title: Text(nm, style: const TextStyle(fontWeight: FontWeight.w700)),
-                  subtitle: Text('@${c['username']}', style: const TextStyle(color: mist)),
-                  onTap: () => send(c),
-                );
-              },
-            ),
+          : ListView(children: items),
     );
   }
 }
@@ -1037,11 +1202,12 @@ class _VPState extends State<VoicePlayer> {
   }
 }
 
-// ---------- chat ----------
+// ---------- chat (direct, group and community) ----------
 class ChatScreen extends StatefulWidget {
   final String peerId, username, name;
   final String? avatar;
-  const ChatScreen({required this.peerId, required this.username, required this.name, this.avatar, super.key});
+  final Map<String, dynamic>? conv;
+  const ChatScreen({this.peerId = '', this.username = '', this.name = '', this.avatar, this.conv, super.key});
   @override
   State<ChatScreen> createState() => _ChatState();
 }
@@ -1050,6 +1216,12 @@ class _ChatState extends State<ChatScreen> {
   List<Map<String, dynamic>> msgs = [];
   Map<int, Map<String, int>> reacts = {};
   Map<int, String> myReact = {};
+  Map<String, Map<String, dynamic>> people = {};
+  Map<String, dynamic>? cv;
+  String myRole = 'member';
+  int memberCount = 0;
+  int lastMarked = 0;
+  bool removed = false;
   final ctl = TextEditingController();
   final rec = AudioRecorder();
   Timer? poll, typingOff, recT;
@@ -1059,27 +1231,49 @@ class _ChatState extends State<ChatScreen> {
   Map<String, dynamic>? replyTo;
   RealtimeChannel? tc;
   String get me => sb.auth.currentUser!.id;
+  bool get isConv => cv != null;
+  String get cid => cv!['id'].toString();
+
+  bool get canPost {
+    if (!isConv) return true;
+    if (removed) return false;
+    final only = cv!['only_admins_post'] == true;
+    return !only || roleRank(myRole) >= 40;
+  }
+
+  String nameOf(String id) {
+    if (id == me) return 'Tum';
+    if (isConv) return (people[id]?['name'] ?? 'Member').toString();
+    return widget.name;
+  }
 
   @override
   void initState() {
     super.initState();
+    cv = widget.conv == null ? null : Map<String, dynamic>.from(widget.conv!);
     load();
+    loadPeople();
     Live.tick.addListener(load);
     ctl.addListener(() {
       if (mounted) setState(() {});
     });
-    poll = Timer.periodic(const Duration(seconds: 15), (_) => load());
-    final ids = [me, widget.peerId]..sort();
-    tc = sb.channel('typing_${ids[0]}_${ids[1]}').onBroadcast(
-        event: 'typing',
-        callback: (_) {
-          if (!mounted) return;
-          setState(() => peerTyping = true);
-          typingOff?.cancel();
-          typingOff = Timer(const Duration(seconds: 3), () {
-            if (mounted) setState(() => peerTyping = false);
-          });
-        }).subscribe();
+    poll = Timer.periodic(const Duration(seconds: 15), (_) {
+      load();
+      loadPeople();
+    });
+    if (!isConv) {
+      final ids = [me, widget.peerId]..sort();
+      tc = sb.channel('typing_${ids[0]}_${ids[1]}').onBroadcast(
+          event: 'typing',
+          callback: (_) {
+            if (!mounted) return;
+            setState(() => peerTyping = true);
+            typingOff?.cancel();
+            typingOff = Timer(const Duration(seconds: 3), () {
+              if (mounted) setState(() => peerTyping = false);
+            });
+          }).subscribe();
+    }
   }
 
   @override
@@ -1094,12 +1288,38 @@ class _ChatState extends State<ChatScreen> {
     super.dispose();
   }
 
+  Future<void> loadPeople() async {
+    if (!isConv) return;
+    try {
+      final c = await sb.from('conversations').select().eq('id', cid).maybeSingle();
+      final ms = await sb.from('conv_members').select('user_id, role, profiles(username,name,avatar_url)').eq('conv_id', cid);
+      if (!mounted) return;
+      final pm = <String, Map<String, dynamic>>{};
+      String mr = 'member';
+      for (final r in List<Map<String, dynamic>>.from(ms)) {
+        final pr = r['profiles'] is Map ? Map<String, dynamic>.from(r['profiles'] as Map) : <String, dynamic>{};
+        pm[r['user_id'].toString()] = {
+          'role': (r['role'] ?? 'member').toString(),
+          'name': (pr['name'] ?? pr['username'] ?? 'Member').toString(),
+        };
+        if (r['user_id'] == me) mr = r['role'].toString();
+      }
+      setState(() {
+        if (c != null) cv = Map<String, dynamic>.from(c);
+        people = pm;
+        myRole = mr;
+        memberCount = pm.length;
+        removed = !pm.containsKey(me);
+      });
+    } catch (_) {}
+  }
+
   Future<void> load() async {
     try {
-      final d = await sb
-          .from('messages')
-          .select()
-          .or('and(sender.eq.$me,receiver.eq.${widget.peerId}),and(sender.eq.${widget.peerId},receiver.eq.$me)')
+      final q = sb.from('messages').select();
+      final d = await (isConv
+              ? q.eq('conv_id', cid)
+              : q.or('and(sender.eq.$me,receiver.eq.${widget.peerId}),and(sender.eq.${widget.peerId},receiver.eq.$me)'))
           .order('id', ascending: false)
           .limit(300);
       if (!mounted) return;
@@ -1124,7 +1344,12 @@ class _ChatState extends State<ChatScreen> {
           });
         }
       }
-      if (list.any((m) => m['sender'] == widget.peerId && m['seen'] == false)) {
+      if (isConv) {
+        if (list.isNotEmpty && (list.first['id'] as int) != lastMarked) {
+          lastMarked = list.first['id'] as int;
+          await sb.rpc('mark_conv_read', params: {'p_conv': cid});
+        }
+      } else if (list.any((m) => m['sender'] == widget.peerId && m['seen'] == false)) {
         await sb.rpc('mark_seen', params: {'p_peer': widget.peerId});
       }
     } catch (_) {}
@@ -1137,10 +1362,10 @@ class _ChatState extends State<ChatScreen> {
     ctl.clear();
     setState(() => replyTo = null);
     try {
-      await insertMessage(widget.peerId, body: t, replyTo: rid);
+      await insertMessage(isConv ? null : widget.peerId, convId: isConv ? cid : null, body: t, replyTo: rid);
       await load();
-    } catch (_) {
-      if (mounted) toast(context, 'Message nahi gaya, dobara try karo');
+    } catch (e) {
+      if (mounted) toast(context, isConv ? errText(e) : 'Message nahi gaya, dobara try karo');
     }
   }
 
@@ -1154,7 +1379,8 @@ class _ChatState extends State<ChatScreen> {
     setState(() => uploading = true);
     try {
       final url = await uploadFile(f, name);
-      await insertMessage(widget.peerId, kind: kind, url: url, mname: name, msize: size, dur: dur, replyTo: rid);
+      await insertMessage(isConv ? null : widget.peerId,
+          convId: isConv ? cid : null, kind: kind, url: url, mname: name, msize: size, dur: dur, replyTo: rid);
       if (mounted) setState(() => replyTo = null);
       await load();
     } catch (_) {
@@ -1250,6 +1476,7 @@ class _ChatState extends State<ChatScreen> {
   }
 
   void onType(String _) {
+    if (isConv) return;
     final n = DateTime.now();
     if (n.difference(lastSent).inSeconds < 2) return;
     lastSent = n;
@@ -1292,7 +1519,7 @@ class _ChatState extends State<ChatScreen> {
             padding: const EdgeInsets.fromLTRB(14, 18, 14, 8),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: ['👍', '❤️', '😂', '😮', '😢', '🙏']
+              children: ['\ud83d\udc4d', '\u2764\ufe0f', '\ud83d\ude02', '\ud83d\ude2e', '\ud83d\ude22', '\ud83d\ude4f']
                   .map((e) => GestureDetector(
                         onTap: () {
                           Navigator.pop(ctx);
@@ -1303,14 +1530,15 @@ class _ChatState extends State<ChatScreen> {
                   .toList(),
             ),
           ),
-          ListTile(
-            leading: const Icon(Icons.reply),
-            title: const Text('Reply'),
-            onTap: () {
-              Navigator.pop(ctx);
-              setState(() => replyTo = m);
-            },
-          ),
+          if (canPost)
+            ListTile(
+              leading: const Icon(Icons.reply),
+              title: const Text('Reply'),
+              onTap: () {
+                Navigator.pop(ctx);
+                setState(() => replyTo = m);
+              },
+            ),
           ListTile(
             leading: const Icon(Icons.forward),
             title: const Text('Forward'),
@@ -1343,6 +1571,25 @@ class _ChatState extends State<ChatScreen> {
     );
   }
 
+  Widget senderLabel(Map<String, dynamic> m) {
+    final p = people[m['sender'].toString()];
+    final nm = (p?['name'] ?? 'Ex-member').toString();
+    final rl = roleLabel((p?['role'] ?? 'member').toString());
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 3),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Flexible(child: Text(nm, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: nameColor(nm)))),
+        if (rl.isNotEmpty)
+          Container(
+            margin: const EdgeInsets.only(left: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+            decoration: BoxDecoration(color: const Color(0x33FFFCD0), borderRadius: BorderRadius.circular(6)),
+            child: Text(rl, style: const TextStyle(fontSize: 10, color: vanilla)),
+          ),
+      ]),
+    );
+  }
+
   Widget quote(Map<String, dynamic> m, bool mine) {
     final rid = m['reply_to'];
     if (rid == null) return const SizedBox.shrink();
@@ -1364,7 +1611,7 @@ class _ChatState extends State<ChatScreen> {
           const SizedBox(width: 8),
           Flexible(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(o == null ? '' : (o['sender'] == me ? 'Tum' : widget.name), style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: mine ? slate : vanilla)),
+              Text(o == null ? '' : nameOf(o['sender'].toString()), style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: mine ? slate : vanilla)),
               Text(o == null ? 'Message' : previewMsg(o), maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 13, color: mine ? slate : mist)),
             ]),
           ),
@@ -1467,6 +1714,7 @@ class _ChatState extends State<ChatScreen> {
               ),
             ),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+              if (isConv && !mine && !del) senderLabel(m),
               if (m['forwarded'] == true && !del)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 4),
@@ -1479,7 +1727,7 @@ class _ChatState extends State<ChatScreen> {
                 alignment: Alignment.centerRight,
                 child: Row(mainAxisSize: MainAxisSize.min, children: [
                   Text(fmtTime(m['created_at']), style: TextStyle(fontSize: 11, color: mine ? slate : mist)),
-                  if (mine) ...[const SizedBox(width: 4), ticks(m['delivered'] == true, m['seen'] == true)],
+                  if (mine && !isConv) ...[const SizedBox(width: 4), ticks(m['delivered'] == true, m['seen'] == true)],
                 ]),
               ),
             ]),
@@ -1506,12 +1754,22 @@ class _ChatState extends State<ChatScreen> {
         const SizedBox(width: 10),
         Expanded(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(r['sender'] == me ? 'Tum' : widget.name, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700)),
+            Text(nameOf(r['sender'].toString()), style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700)),
             Text(previewMsg(r), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, color: mist)),
           ]),
         ),
         IconButton(onPressed: () => setState(() => replyTo = null), icon: const Icon(Icons.close, size: 20)),
       ]),
+    );
+  }
+
+  Widget blockedBar() {
+    final txt = removed ? 'Tum ab is chat me nahi ho' : 'Sirf admin roles message bhej sakte hain';
+    return Container(
+      width: double.infinity,
+      color: const Color(0xE0262323),
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 18),
+      child: Text(txt, textAlign: TextAlign.center, style: const TextStyle(color: mist, fontSize: 14)),
     );
   }
 
@@ -1570,8 +1828,18 @@ class _ChatState extends State<ChatScreen> {
     );
   }
 
+  void openInfo() {
+    Navigator.push(context, MaterialPageRoute(builder: (_) => ConvInfoScreen(cid))).then((_) => loadPeople());
+  }
+
   @override
   Widget build(BuildContext context) {
+    final title = isConv ? (cv!['name'] ?? '').toString() : widget.name;
+    final av = isConv ? cv!['avatar_url']?.toString() : widget.avatar;
+    final comm = isConv && cv!['type'] == 'community';
+    final sub = isConv
+        ? (comm ? 'Community | $memberCount members' : '$memberCount members')
+        : (peerTyping ? 'typing...' : '@${widget.username}');
     return Scaffold(
       body: WallBg(
         child: SafeArea(
@@ -1581,14 +1849,23 @@ class _ChatState extends State<ChatScreen> {
               padding: const EdgeInsets.fromLTRB(6, 8, 16, 8),
               child: Row(children: [
                 IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.arrow_back)),
-                Av(widget.name, url: widget.avatar, w: 38),
-                const SizedBox(width: 12),
                 Expanded(
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text(widget.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
-                    Text(peerTyping ? 'typing...' : '@${widget.username}', style: TextStyle(fontSize: 12.5, color: peerTyping ? vanilla : mist)),
-                  ]),
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: isConv ? openInfo : null,
+                    child: Row(children: [
+                      Av(title, url: av, w: 38),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
+                          Text(sub, style: TextStyle(fontSize: 12.5, color: peerTyping ? vanilla : mist)),
+                        ]),
+                      ),
+                    ]),
+                  ),
                 ),
+                if (comm) ibtn(Icons.groups, () => Navigator.push(context, MaterialPageRoute(builder: (_) => CommunityGroupsScreen(cv!)))),
                 ibtn(Icons.wallpaper, () => showWallpaper(context)),
               ]),
             ),
@@ -1601,8 +1878,8 @@ class _ChatState extends State<ChatScreen> {
               ),
             ),
             if (uploading) const LinearProgressIndicator(minHeight: 2, color: vanilla, backgroundColor: slate),
-            if (replyTo != null) replyBar(),
-            inputRow(),
+            if (replyTo != null && canPost) replyBar(),
+            canPost ? inputRow() : blockedBar(),
           ]),
         ),
       ),
