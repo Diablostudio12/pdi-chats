@@ -14,6 +14,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
+import 'extras.dart';
 import 'groups.dart';
 
 const kUrl = 'https://jmmwvitwcrcpfxpeuuvm.supabase.co';
@@ -72,6 +73,10 @@ String mimeOf(String ext) {
     'm4a': 'audio/mp4',
     'mp3': 'audio/mpeg',
     'wav': 'audio/wav',
+    'aac': 'audio/aac',
+    'ogg': 'audio/ogg',
+    'opus': 'audio/ogg',
+    'flac': 'audio/flac',
     'pdf': 'application/pdf',
   };
   return m[ext] ?? 'application/octet-stream';
@@ -134,6 +139,7 @@ Color nameColor(String s) {
 
 String previewMsg(Map<String, dynamic> m) {
   if (m['deleted'] == true) return 'Message delete kiya gaya';
+  if (m['view_once'] == true) return '\ud83d\udd12 Ek baar dekhne wala';
   switch ((m['kind'] ?? 'text').toString()) {
     case 'image':
       return '\ud83d\udcf7 Photo';
@@ -141,6 +147,8 @@ String previewMsg(Map<String, dynamic> m) {
       return '\ud83c\udfa5 Video';
     case 'voice':
       return '\ud83c\udfa4 Voice message';
+    case 'audio':
+      return '\ud83c\udfb5 ${m['media_name'] ?? 'Audio'}';
     case 'file':
       return '\ud83d\udcc4 ${m['media_name'] ?? 'File'}';
     default:
@@ -168,7 +176,8 @@ Future<void> insertMessage(String? to,
     int? msize,
     int? dur,
     int? replyTo,
-    bool fwd = false}) async {
+    bool fwd = false,
+    bool viewOnce = false}) async {
   await sb.from('messages').insert({
     'sender': sb.auth.currentUser!.id,
     'receiver': to,
@@ -181,6 +190,7 @@ Future<void> insertMessage(String? to,
     'duration': dur,
     'reply_to': replyTo,
     'forwarded': fwd,
+    'view_once': viewOnce,
   });
 }
 
@@ -527,6 +537,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeState extends State<HomeScreen> {
   List<Map<String, dynamic>> chats = [], convs = [];
+  Set<String> pinned = {};
   String filter = 'all';
   Timer? t;
   String get myName => (sb.auth.currentUser?.email ?? '').split('@').first;
@@ -535,9 +546,13 @@ class _HomeState extends State<HomeScreen> {
   void initState() {
     super.initState();
     Live.start();
+    touchPresence();
     load();
     Live.tick.addListener(load);
-    t = Timer.periodic(const Duration(seconds: 20), (_) => load());
+    t = Timer.periodic(const Duration(seconds: 20), (_) {
+      touchPresence();
+      load();
+    });
   }
 
   @override
@@ -559,6 +574,25 @@ class _HomeState extends State<HomeScreen> {
       final d = await sb.rpc('my_convs');
       if (mounted) setState(() => convs = List<Map<String, dynamic>>.from((d as List).map((e) => Map<String, dynamic>.from(e))));
     } catch (_) {}
+    try {
+      final d = await sb.from('pinned_chats').select('chat_key');
+      if (mounted) setState(() => pinned = {for (final r in List<Map<String, dynamic>>.from(d)) r['chat_key'].toString()});
+    } catch (_) {}
+  }
+
+  Future<void> togglePin(String key) async {
+    final was = pinned.contains(key);
+    try {
+      if (was) {
+        await sb.from('pinned_chats').delete().eq('chat_key', key);
+      } else {
+        await sb.from('pinned_chats').insert({'chat_key': key});
+      }
+      await load();
+      if (mounted) toast(context, was ? 'Unpin kiya' : 'Pin kiya');
+    } catch (_) {
+      if (mounted) toast(context, 'Pin nahi hua');
+    }
   }
 
   Future<void> openSearch() async {
@@ -614,13 +648,20 @@ class _HomeState extends State<HomeScreen> {
     );
   }
 
+  String keyOf(Map<String, dynamic> c) => c['_conv'] == true ? c['id'].toString() : c['peer_id'].toString();
+
   @override
   Widget build(BuildContext context) {
     final all = <Map<String, dynamic>>[
       for (final c in chats) {...c, '_conv': false},
       for (final c in convs) {...c, '_conv': true},
     ];
-    all.sort((a, b) => DateTime.parse(b['last_at'].toString()).compareTo(DateTime.parse(a['last_at'].toString())));
+    all.sort((a, b) {
+      final pa = pinned.contains(keyOf(a)) ? 1 : 0;
+      final pb = pinned.contains(keyOf(b)) ? 1 : 0;
+      if (pa != pb) return pb - pa;
+      return DateTime.parse(b['last_at'].toString()).compareTo(DateTime.parse(a['last_at'].toString()));
+    });
     final shown = all.where((c) {
       final unread = (c['unread'] ?? 0) as int;
       switch (filter) {
@@ -650,7 +691,7 @@ class _HomeState extends State<HomeScreen> {
               child: Row(children: [
                 const Expanded(child: Text('PDI CHATS', style: TextStyle(fontFamily: 'serif', fontSize: 36, fontWeight: FontWeight.w700, letterSpacing: 1.5))),
                 ibtn(Icons.search, openSearch),
-                ibtn(Icons.wallpaper, () => showWallpaper(context)),
+                ibtn(Icons.donut_large, () => Navigator.push(context, MaterialPageRoute(builder: (_) => const StatusScreen()))),
                 Padding(
                   padding: const EdgeInsets.only(left: 10),
                   child: PopupMenuButton<String>(
@@ -659,6 +700,12 @@ class _HomeState extends State<HomeScreen> {
                       if (v == 'profile') {
                         await Navigator.push(context, MaterialPageRoute(builder: (_) => const ProfileScreen()));
                         load();
+                      } else if (v == 'starred') {
+                        await Navigator.push(context, MaterialPageRoute(builder: (_) => const StarredScreen()));
+                      } else if (v == 'settings') {
+                        await Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen()));
+                      } else if (v == 'wall') {
+                        showWallpaper(context);
                       } else if (v == 'out') {
                         Live.stop();
                         await sb.auth.signOut();
@@ -667,6 +714,9 @@ class _HomeState extends State<HomeScreen> {
                     itemBuilder: (_) => [
                       PopupMenuItem<String>(enabled: false, child: Text('@$myName')),
                       const PopupMenuItem<String>(value: 'profile', child: Text('Profile')),
+                      const PopupMenuItem<String>(value: 'starred', child: Text('Starred messages')),
+                      const PopupMenuItem<String>(value: 'settings', child: Text('Settings')),
+                      const PopupMenuItem<String>(value: 'wall', child: Text('Wallpaper')),
                       const PopupMenuItem<String>(value: 'out', child: Text('Logout')),
                     ],
                     child: circ(Icons.menu),
@@ -710,18 +760,24 @@ class _HomeState extends State<HomeScreen> {
     );
   }
 
+  Widget pinIcon(String key, Color col) => pinned.contains(key)
+      ? Padding(padding: const EdgeInsets.only(right: 6), child: Icon(Icons.push_pin, size: 14, color: col))
+      : const SizedBox.shrink();
+
   Widget tile(Map<String, dynamic> c) {
     final unread = (c['unread'] ?? 0) as int;
     final mine = c['mine'] == true;
     final col = unread > 0 ? vanilla : mist;
     final nm = (c['name'] ?? c['username']).toString();
     final av = c['avatar_url']?.toString();
+    final key = c['peer_id'].toString();
     return InkWell(
+      onLongPress: () => togglePin(key),
       onTap: () async {
         await Navigator.push(
             context,
             MaterialPageRoute(
-                builder: (_) => ChatScreen(peerId: c['peer_id'].toString(), username: c['username'].toString(), name: nm, avatar: av)));
+                builder: (_) => ChatScreen(peerId: key, username: c['username'].toString(), name: nm, avatar: av)));
         load();
       },
       child: Padding(
@@ -733,6 +789,7 @@ class _HomeState extends State<HomeScreen> {
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Row(children: [
                 Expanded(child: Text(nm, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: col))),
+                pinIcon(key, col),
                 Text(fmtList(c['last_at']), style: TextStyle(fontSize: 12, color: col)),
               ]),
               const SizedBox(height: 4),
@@ -760,6 +817,7 @@ class _HomeState extends State<HomeScreen> {
     final nm = c['name'].toString();
     final isComm = c['type'] == 'community';
     final who = c['last_sender']?.toString();
+    final key = c['id'].toString();
     String line;
     if (c['last_kind'] == null) {
       line = 'Abhi koi message nahi';
@@ -769,6 +827,7 @@ class _HomeState extends State<HomeScreen> {
       line = previewOf(c);
     }
     return InkWell(
+      onLongPress: () => togglePin(key),
       onTap: () async {
         await Navigator.push(context, MaterialPageRoute(builder: (_) => ChatScreen(conv: c)));
         load();
@@ -783,6 +842,7 @@ class _HomeState extends State<HomeScreen> {
               Row(children: [
                 if (isComm) ...[Icon(Icons.campaign, size: 17, color: col), const SizedBox(width: 6)],
                 Expanded(child: Text(nm, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: col))),
+                pinIcon(key, col),
                 Text(fmtList(c['last_at']), style: TextStyle(fontSize: 12, color: col)),
               ]),
               const SizedBox(height: 4),
@@ -1139,6 +1199,7 @@ class VoicePlayer extends StatefulWidget {
 class _VPState extends State<VoicePlayer> {
   final p = AudioPlayer();
   bool playing = false;
+  double rate = 1.0;
   Duration pos = Duration.zero;
   Duration total = Duration.zero;
 
@@ -1178,7 +1239,20 @@ class _VPState extends State<VoicePlayer> {
       await p.resume();
     } else {
       await p.play(UrlSource(widget.url));
+      if (rate != 1.0) {
+        try {
+          await p.setPlaybackRate(rate);
+        } catch (_) {}
+      }
     }
+  }
+
+  Future<void> cycleRate() async {
+    final r = rate == 1.0 ? 1.5 : (rate == 1.5 ? 2.0 : 1.0);
+    setState(() => rate = r);
+    try {
+      await p.setPlaybackRate(r);
+    } catch (_) {}
   }
 
   @override
@@ -1186,10 +1260,11 @@ class _VPState extends State<VoicePlayer> {
     final fg = widget.mine ? ink : vanilla;
     final tm = math.max(total.inMilliseconds, 1);
     final val = math.min(pos.inMilliseconds, tm) / tm;
+    final rateLabel = rate == 1.0 ? '1x' : (rate == 1.5 ? '1.5x' : '2x');
     return Row(mainAxisSize: MainAxisSize.min, children: [
       GestureDetector(onTap: toggle, child: Icon(playing ? Icons.pause_circle_filled : Icons.play_circle_fill, size: 38, color: fg)),
       SizedBox(
-        width: 140,
+        width: 104,
         child: Slider(
           value: val.toDouble(),
           activeColor: fg,
@@ -1198,6 +1273,15 @@ class _VPState extends State<VoicePlayer> {
         ),
       ),
       Text(fmtDur(playing || pos > Duration.zero ? pos : total), style: TextStyle(fontSize: 12, color: fg)),
+      const SizedBox(width: 6),
+      GestureDetector(
+        onTap: cycleRate,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+          decoration: BoxDecoration(border: Border.all(color: mist), borderRadius: BorderRadius.circular(10)),
+          child: Text(rateLabel, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: fg)),
+        ),
+      ),
     ]);
   }
 }
@@ -1218,11 +1302,17 @@ class _ChatState extends State<ChatScreen> {
   Map<int, String> myReact = {};
   Map<String, Map<String, dynamic>> people = {};
   Map<String, dynamic>? cv;
+  Map<String, dynamic>? presence;
+  Set<int> stars = {};
   String myRole = 'member';
   int memberCount = 0;
   int lastMarked = 0;
+  int disappear = 0;
   bool removed = false;
+  bool iBlocked = false, searching = false, viewOnceMode = false;
+  String q = '';
   final ctl = TextEditingController();
+  final searchCtl = TextEditingController();
   final rec = AudioRecorder();
   Timer? poll, typingOff, recT;
   DateTime lastSent = DateTime(2000);
@@ -1253,6 +1343,7 @@ class _ChatState extends State<ChatScreen> {
     cv = widget.conv == null ? null : Map<String, dynamic>.from(widget.conv!);
     load();
     loadPeople();
+    loadMeta();
     Live.tick.addListener(load);
     ctl.addListener(() {
       if (mounted) setState(() {});
@@ -1260,6 +1351,7 @@ class _ChatState extends State<ChatScreen> {
     poll = Timer.periodic(const Duration(seconds: 15), (_) {
       load();
       loadPeople();
+      loadMeta();
     });
     if (!isConv) {
       final ids = [me, widget.peerId]..sort();
@@ -1285,6 +1377,7 @@ class _ChatState extends State<ChatScreen> {
     if (tc != null) sb.removeChannel(tc!);
     rec.dispose();
     ctl.dispose();
+    searchCtl.dispose();
     super.dispose();
   }
 
@@ -1310,6 +1403,25 @@ class _ChatState extends State<ChatScreen> {
         myRole = mr;
         memberCount = pm.length;
         removed = !pm.containsKey(me);
+      });
+    } catch (_) {}
+  }
+
+  Future<void> loadMeta() async {
+    try {
+      final dis = await sb.rpc('get_disappear', params: {'p_peer': isConv ? null : widget.peerId, 'p_conv': isConv ? cid : null});
+      Map<String, dynamic>? pr;
+      var bl = false;
+      if (!isConv) {
+        pr = await sb.from('presence').select().eq('user_id', widget.peerId).maybeSingle();
+        final b = await sb.from('blocks').select('blocked').eq('blocked', widget.peerId).maybeSingle();
+        bl = b != null;
+      }
+      if (!mounted) return;
+      setState(() {
+        disappear = (dis as num?)?.toInt() ?? 0;
+        presence = pr;
+        iBlocked = bl;
       });
     } catch (_) {}
   }
@@ -1343,6 +1455,10 @@ class _ChatState extends State<ChatScreen> {
             myReact = mine;
           });
         }
+        try {
+          final ss = await sb.from('starred').select('message_id').inFilter('message_id', ids);
+          if (mounted) setState(() => stars = {for (final r in List<Map<String, dynamic>>.from(ss)) r['message_id'] as int});
+        } catch (_) {}
       }
       if (isConv) {
         if (list.isNotEmpty && (list.first['id'] as int) != lastMarked) {
@@ -1376,12 +1492,25 @@ class _ChatState extends State<ChatScreen> {
       return;
     }
     final rid = replyTo?['id'] as int?;
+    final once = !isConv && viewOnceMode && (kind == 'image' || kind == 'video');
     setState(() => uploading = true);
     try {
       final url = await uploadFile(f, name);
       await insertMessage(isConv ? null : widget.peerId,
-          convId: isConv ? cid : null, kind: kind, url: url, mname: name, msize: size, dur: dur, replyTo: rid);
-      if (mounted) setState(() => replyTo = null);
+          convId: isConv ? cid : null,
+          kind: kind,
+          url: url,
+          mname: name,
+          msize: size,
+          dur: dur,
+          replyTo: rid,
+          viewOnce: once);
+      if (mounted) {
+        setState(() {
+          replyTo = null;
+          if (once) viewOnceMode = false;
+        });
+      }
       await load();
     } catch (_) {
       if (mounted) toast(context, 'Upload nahi hua, dobara try karo');
@@ -1404,6 +1533,12 @@ class _ChatState extends State<ChatScreen> {
     final r = await FilePicker.platform.pickFiles();
     final f = r?.files.single;
     if (f != null && f.path != null) await sendMedia(File(f.path!), f.name, 'file');
+  }
+
+  Future<void> pickAudio() async {
+    final r = await FilePicker.platform.pickFiles(type: FileType.audio);
+    final f = r?.files.single;
+    if (f != null && f.path != null) await sendMedia(File(f.path!), f.name, 'audio');
   }
 
   Widget opt(BuildContext ctx, IconData i, String label, Future<void> Function() f) => GestureDetector(
@@ -1431,12 +1566,18 @@ class _ChatState extends State<ChatScreen> {
       builder: (ctx) => SafeArea(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(22, 24, 22, 20),
-          child: Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
-            opt(ctx, Icons.photo, 'Photo', () => pickImg(ImageSource.gallery)),
-            opt(ctx, Icons.photo_camera, 'Camera', () => pickImg(ImageSource.camera)),
-            opt(ctx, Icons.videocam, 'Video', pickVid),
-            opt(ctx, Icons.insert_drive_file, 'File', pickDoc),
-          ]),
+          child: Wrap(
+            alignment: WrapAlignment.spaceEvenly,
+            spacing: 24,
+            runSpacing: 20,
+            children: [
+              opt(ctx, Icons.photo, 'Photo', () => pickImg(ImageSource.gallery)),
+              opt(ctx, Icons.photo_camera, 'Camera', () => pickImg(ImageSource.camera)),
+              opt(ctx, Icons.videocam, 'Video', pickVid),
+              opt(ctx, Icons.audiotrack, 'Audio', pickAudio),
+              opt(ctx, Icons.insert_drive_file, 'File', pickDoc),
+            ],
+          ),
         ),
       ),
     );
@@ -1506,69 +1647,243 @@ class _ChatState extends State<ChatScreen> {
     }
   }
 
+  Future<void> editMsg(Map<String, dynamic> m) async {
+    final c = TextEditingController(text: (m['body'] ?? '').toString());
+    final v = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: slate,
+        title: const Text('Message edit karo'),
+        content: TextField(controller: c, autofocus: true, minLines: 1, maxLines: 5, maxLength: 4000),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel', style: TextStyle(color: mist))),
+          TextButton(onPressed: () => Navigator.pop(ctx, c.text.trim()), child: const Text('Save')),
+        ],
+      ),
+    );
+    if (v == null || v.isEmpty || v == (m['body'] ?? '').toString()) return;
+    try {
+      await sb.rpc('edit_message', params: {'p_id': m['id'], 'p_body': v});
+      await load();
+    } catch (_) {
+      if (mounted) toast(context, 'Edit nahi hua');
+    }
+  }
+
+  Future<void> star(Map<String, dynamic> m) async {
+    final id = m['id'] as int;
+    try {
+      if (stars.contains(id)) {
+        await sb.from('starred').delete().eq('message_id', id);
+      } else {
+        await sb.from('starred').insert({'message_id': id});
+      }
+      await load();
+    } catch (_) {
+      if (mounted) toast(context, 'Star nahi hua');
+    }
+  }
+
+  Future<void> openOnce(Map<String, dynamic> m) async {
+    final url = (m['media_url'] ?? '').toString();
+    if (url.isEmpty) return;
+    final isVid = m['kind'] == 'video';
+    await Navigator.push(context, MaterialPageRoute(builder: (_) => isVid ? VideoScreen(url) : ImageView(url)));
+    try {
+      await sb.rpc('mark_viewed', params: {'p_id': m['id']});
+      await load();
+    } catch (_) {}
+  }
+
   void actions(Map<String, dynamic> m) {
     final mine = m['sender'] == me;
     final kind = (m['kind'] ?? 'text').toString();
+    final once = m['view_once'] == true;
+    final starred = stars.contains(m['id'] as int);
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: slate,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+      builder: (ctx) => SafeArea(
+        child: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 18, 14, 8),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: ['\ud83d\udc4d', '\u2764\ufe0f', '\ud83d\ude02', '\ud83d\ude2e', '\ud83d\ude22', '\ud83d\ude4f']
+                    .map((e) => GestureDetector(
+                          onTap: () {
+                            Navigator.pop(ctx);
+                            react(m, e);
+                          },
+                          child: Text(e, style: const TextStyle(fontSize: 30)),
+                        ))
+                    .toList(),
+              ),
+            ),
+            if (canPost)
+              ListTile(
+                leading: const Icon(Icons.reply),
+                title: const Text('Reply'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  setState(() => replyTo = m);
+                },
+              ),
+            if (!once)
+              ListTile(
+                leading: const Icon(Icons.forward),
+                title: const Text('Forward'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  Navigator.push(context, MaterialPageRoute(builder: (_) => ForwardScreen(m)));
+                },
+              ),
+            if (kind == 'text' && !once)
+              ListTile(
+                leading: const Icon(Icons.copy),
+                title: const Text('Copy'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  Clipboard.setData(ClipboardData(text: m['body'].toString()));
+                  toast(context, 'Copy ho gaya');
+                },
+              ),
+            if (!once)
+              ListTile(
+                leading: Icon(starred ? Icons.star : Icons.star_border),
+                title: Text(starred ? 'Unstar' : 'Star'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  star(m);
+                },
+              ),
+            if (mine && kind == 'text')
+              ListTile(
+                leading: const Icon(Icons.edit),
+                title: const Text('Edit'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  editMsg(m);
+                },
+              ),
+            if (mine)
+              ListTile(
+                leading: const Icon(Icons.delete_outline, color: Color(0xFFFF7A7A)),
+                title: const Text('Sabke liye delete karo', style: TextStyle(color: Color(0xFFFF7A7A))),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  deleteMsg(m);
+                },
+              ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  // ----- header menu -----
+  void onMenu(String v) {
+    switch (v) {
+      case 'search':
+        setState(() {
+          searching = true;
+          q = '';
+          searchCtl.clear();
+        });
+        break;
+      case 'timer':
+        pickTimer();
+        break;
+      case 'starred':
+        Navigator.push(context, MaterialPageRoute(builder: (_) => const StarredScreen()));
+        break;
+      case 'block':
+        toggleBlock();
+        break;
+      case 'report':
+        reportUser();
+        break;
+      case 'wall':
+        showWallpaper(context);
+        break;
+    }
+  }
+
+  String disLabel(int s) => s == 86400 ? '24 ghante' : (s == 604800 ? '7 din' : '90 din');
+
+  void pickTimer() {
+    final opts = <String, int>{'Band': 0, '24 ghante': 86400, '7 din': 604800, '90 din': 7776000};
     showModalBottomSheet(
       context: context,
       backgroundColor: slate,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
       builder: (ctx) => SafeArea(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(14, 18, 14, 8),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: ['\ud83d\udc4d', '\u2764\ufe0f', '\ud83d\ude02', '\ud83d\ude2e', '\ud83d\ude22', '\ud83d\ude4f']
-                  .map((e) => GestureDetector(
-                        onTap: () {
-                          Navigator.pop(ctx);
-                          react(m, e);
-                        },
-                        child: Text(e, style: const TextStyle(fontSize: 30)),
-                      ))
-                  .toList(),
-            ),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(22, 20, 22, 4),
+            child: Align(alignment: Alignment.centerLeft, child: Text('Disappearing messages', style: TextStyle(fontFamily: 'serif', fontSize: 24, fontWeight: FontWeight.w700))),
           ),
-          if (canPost)
-            ListTile(
-              leading: const Icon(Icons.reply),
-              title: const Text('Reply'),
-              onTap: () {
-                Navigator.pop(ctx);
-                setState(() => replyTo = m);
-              },
-            ),
-          ListTile(
-            leading: const Icon(Icons.forward),
-            title: const Text('Forward'),
-            onTap: () {
-              Navigator.pop(ctx);
-              Navigator.push(context, MaterialPageRoute(builder: (_) => ForwardScreen(m)));
-            },
+          const Padding(
+            padding: EdgeInsets.fromLTRB(22, 0, 22, 8),
+            child: Align(alignment: Alignment.centerLeft, child: Text('Sirf naye messages par lagega', style: TextStyle(color: mist, fontSize: 13))),
           ),
-          if (kind == 'text')
-            ListTile(
-              leading: const Icon(Icons.copy),
-              title: const Text('Copy'),
-              onTap: () {
-                Navigator.pop(ctx);
-                Clipboard.setData(ClipboardData(text: m['body'].toString()));
-                toast(context, 'Copy ho gaya');
-              },
-            ),
-          if (mine)
-            ListTile(
-              leading: const Icon(Icons.delete_outline, color: Color(0xFFFF7A7A)),
-              title: const Text('Sabke liye delete karo', style: TextStyle(color: Color(0xFFFF7A7A))),
-              onTap: () {
-                Navigator.pop(ctx);
-                deleteMsg(m);
-              },
-            ),
+          ...opts.entries.map((e) => ListTile(
+                title: Text(e.key),
+                trailing: disappear == e.value ? const Icon(Icons.check, color: vanilla) : null,
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  try {
+                    await sb.rpc('set_disappear', params: {'p_peer': isConv ? null : widget.peerId, 'p_conv': isConv ? cid : null, 'p_secs': e.value});
+                    if (mounted) setState(() => disappear = e.value);
+                  } catch (err) {
+                    if (mounted) toast(context, errText(err));
+                  }
+                },
+              )),
+          const SizedBox(height: 10),
         ]),
       ),
     );
+  }
+
+  Future<void> toggleBlock() async {
+    try {
+      if (iBlocked) {
+        await sb.from('blocks').delete().eq('blocked', widget.peerId);
+      } else {
+        await sb.from('blocks').insert({'blocked': widget.peerId});
+      }
+      await loadMeta();
+      if (mounted) toast(context, iBlocked ? 'Block kar diya' : 'Unblock kar diya');
+    } catch (_) {
+      if (mounted) toast(context, 'Ho nahi paya, dobara try karo');
+    }
+  }
+
+  Future<void> reportUser() async {
+    final c = TextEditingController();
+    final r = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: slate,
+        title: const Text('Report karo'),
+        content: TextField(controller: c, autofocus: true, maxLength: 300, decoration: const InputDecoration(hintText: 'Kya problem hai?')),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel', style: TextStyle(color: mist))),
+          TextButton(onPressed: () => Navigator.pop(ctx, c.text.trim()), child: const Text('Bhejo')),
+        ],
+      ),
+    );
+    if (r == null || r.isEmpty) return;
+    try {
+      await sb.from('reports').insert({'reported': widget.peerId, 'reason': r});
+      if (mounted) toast(context, 'Report bhej di gayi');
+    } catch (_) {
+      if (mounted) toast(context, 'Report nahi gayi');
+    }
   }
 
   Widget senderLabel(Map<String, dynamic> m) {
@@ -1630,6 +1945,32 @@ class _ChatState extends State<ChatScreen> {
     if (m['deleted'] == true) {
       return Text('Ye message delete kar diya gaya', style: TextStyle(color: sub, fontStyle: FontStyle.italic, fontSize: 14.5));
     }
+    if (m['view_once'] == true) {
+      final opened = m['viewed'] == true || url.isEmpty;
+      final label = kind == 'video' ? 'Video' : 'Photo';
+      if (opened) {
+        return Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.lock_open, size: 18, color: sub),
+          const SizedBox(width: 8),
+          Text('$label khul chuka hai', style: TextStyle(color: sub, fontStyle: FontStyle.italic, fontSize: 14.5)),
+        ]);
+      }
+      if (mine) {
+        return Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.lock, size: 18, color: sub),
+          const SizedBox(width: 8),
+          Text('$label bheja (ek baar dekhne wala)', style: TextStyle(color: sub, fontStyle: FontStyle.italic, fontSize: 14.5)),
+        ]);
+      }
+      return InkWell(
+        onTap: () => openOnce(m),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.lock, size: 20, color: fg),
+          const SizedBox(width: 8),
+          Text('$label dekho (sirf ek baar)', style: TextStyle(color: fg, fontWeight: FontWeight.w600, fontSize: 15)),
+        ]),
+      );
+    }
     Widget main;
     if (kind == 'image') {
       main = GestureDetector(
@@ -1665,6 +2006,15 @@ class _ChatState extends State<ChatScreen> {
       );
     } else if (kind == 'voice') {
       main = VoicePlayer(key: ValueKey(url), url: url, dur: (m['duration'] ?? 0) as int, mine: mine);
+    } else if (kind == 'audio') {
+      main = Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+        Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.audiotrack, size: 16, color: sub),
+          const SizedBox(width: 6),
+          Flexible(child: Text((m['media_name'] ?? 'Audio').toString(), maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: fg, fontSize: 13.5, fontWeight: FontWeight.w600))),
+        ]),
+        VoicePlayer(key: ValueKey(url), url: url, dur: 0, mine: mine),
+      ]);
     } else if (kind == 'file') {
       main = InkWell(
         onTap: () => launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication),
@@ -1695,6 +2045,7 @@ class _ChatState extends State<ChatScreen> {
     final del = m['deleted'] == true;
     final id = m['id'] as int;
     final rx = reacts[id];
+    final tcol = mine ? slate : mist;
     return Align(
       alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
       child: Column(crossAxisAlignment: mine ? CrossAxisAlignment.end : CrossAxisAlignment.start, children: [
@@ -1718,7 +2069,7 @@ class _ChatState extends State<ChatScreen> {
               if (m['forwarded'] == true && !del)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 4),
-                  child: Text('Forwarded', style: TextStyle(fontSize: 11.5, fontStyle: FontStyle.italic, color: mine ? slate : mist)),
+                  child: Text('Forwarded', style: TextStyle(fontSize: 11.5, fontStyle: FontStyle.italic, color: tcol)),
                 ),
               if (!del) quote(m, mine),
               content(m, mine),
@@ -1726,7 +2077,9 @@ class _ChatState extends State<ChatScreen> {
               Align(
                 alignment: Alignment.centerRight,
                 child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  Text(fmtTime(m['created_at']), style: TextStyle(fontSize: 11, color: mine ? slate : mist)),
+                  if (stars.contains(id)) ...[Icon(Icons.star, size: 12, color: tcol), const SizedBox(width: 4)],
+                  if (m['edited'] == true && !del) ...[Text('edited', style: TextStyle(fontSize: 11, fontStyle: FontStyle.italic, color: tcol)), const SizedBox(width: 5)],
+                  Text(fmtTime(m['created_at']), style: TextStyle(fontSize: 11, color: tcol)),
                   if (mine && !isConv) ...[const SizedBox(width: 4), ticks(m['delivered'] == true, m['seen'] == true)],
                 ]),
               ),
@@ -1773,6 +2126,18 @@ class _ChatState extends State<ChatScreen> {
     );
   }
 
+  Widget unblockBar() {
+    return Container(
+      width: double.infinity,
+      color: const Color(0xE0262323),
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
+      child: Row(children: [
+        const Expanded(child: Text('Tumne ise block kiya hai', style: TextStyle(color: mist, fontSize: 14))),
+        TextButton(onPressed: toggleBlock, child: const Text('Unblock')),
+      ]),
+    );
+  }
+
   Widget inputRow() {
     final hasText = ctl.text.trim().isNotEmpty;
     return Container(
@@ -1797,6 +2162,14 @@ class _ChatState extends State<ChatScreen> {
             ])
           : Row(children: [
               IconButton(onPressed: attach, icon: const Icon(Icons.attach_file, color: mist)),
+              if (!isConv)
+                IconButton(
+                  onPressed: () {
+                    setState(() => viewOnceMode = !viewOnceMode);
+                    toast(context, viewOnceMode ? 'Agla photo/video sirf ek baar dekha ja sakega' : 'Ek-baar mode band');
+                  },
+                  icon: Icon(Icons.filter_1, color: viewOnceMode ? vanilla : mist),
+                ),
               Expanded(
                 child: TextField(
                   controller: ctl,
@@ -1832,14 +2205,53 @@ class _ChatState extends State<ChatScreen> {
     Navigator.push(context, MaterialPageRoute(builder: (_) => ConvInfoScreen(cid))).then((_) => loadPeople());
   }
 
+  Widget searchBar() => Row(children: [
+        IconButton(
+          onPressed: () => setState(() {
+            searching = false;
+            q = '';
+            searchCtl.clear();
+          }),
+          icon: const Icon(Icons.arrow_back),
+        ),
+        Expanded(
+          child: TextField(
+            controller: searchCtl,
+            autofocus: true,
+            onChanged: (v) => setState(() => q = v),
+            decoration: const InputDecoration(hintText: 'Is chat me dhundo', hintStyle: TextStyle(color: mist), border: InputBorder.none),
+          ),
+        ),
+        if (q.isNotEmpty)
+          IconButton(
+            onPressed: () => setState(() {
+              q = '';
+              searchCtl.clear();
+            }),
+            icon: const Icon(Icons.close, size: 20),
+          ),
+      ]);
+
   @override
   Widget build(BuildContext context) {
     final title = isConv ? (cv!['name'] ?? '').toString() : widget.name;
     final av = isConv ? cv!['avatar_url']?.toString() : widget.avatar;
     final comm = isConv && cv!['type'] == 'community';
-    final sub = isConv
-        ? (comm ? 'Community | $memberCount members' : '$memberCount members')
-        : (peerTyping ? 'typing...' : '@${widget.username}');
+    String sub;
+    if (isConv) {
+      sub = comm ? 'Community | $memberCount members' : '$memberCount members';
+    } else if (peerTyping) {
+      sub = 'typing...';
+    } else if (presence != null) {
+      sub = presenceText(presence!['last_seen']);
+    } else {
+      sub = '@${widget.username}';
+    }
+    final lit = peerTyping || sub == 'online';
+    final needle = q.trim().toLowerCase();
+    final shown = needle.isEmpty
+        ? msgs
+        : msgs.where((m) => m['deleted'] != true && '${m['body'] ?? ''} ${m['media_name'] ?? ''}'.toLowerCase().contains(needle)).toList();
     return Scaffold(
       body: WallBg(
         child: SafeArea(
@@ -1847,39 +2259,63 @@ class _ChatState extends State<ChatScreen> {
             Container(
               color: const Color(0xE0262323),
               padding: const EdgeInsets.fromLTRB(6, 8, 16, 8),
-              child: Row(children: [
-                IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.arrow_back)),
-                Expanded(
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onTap: isConv ? openInfo : null,
-                    child: Row(children: [
-                      Av(title, url: av, w: 38),
-                      const SizedBox(width: 12),
+              child: searching
+                  ? searchBar()
+                  : Row(children: [
+                      IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.arrow_back)),
                       Expanded(
-                        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                          Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
-                          Text(sub, style: TextStyle(fontSize: 12.5, color: peerTyping ? vanilla : mist)),
-                        ]),
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: isConv ? openInfo : null,
+                          child: Row(children: [
+                            Av(title, url: av, w: 38),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
+                                Text(sub, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12.5, color: lit ? vanilla : mist)),
+                              ]),
+                            ),
+                          ]),
+                        ),
+                      ),
+                      if (comm) ibtn(Icons.groups, () => Navigator.push(context, MaterialPageRoute(builder: (_) => CommunityGroupsScreen(cv!)))),
+                      Padding(
+                        padding: const EdgeInsets.only(left: 10),
+                        child: PopupMenuButton<String>(
+                          color: slate,
+                          onSelected: onMenu,
+                          itemBuilder: (_) => [
+                            const PopupMenuItem<String>(value: 'search', child: Text('Chat me search')),
+                            if (!isConv || roleRank(myRole) >= 60) const PopupMenuItem<String>(value: 'timer', child: Text('Disappearing messages')),
+                            const PopupMenuItem<String>(value: 'starred', child: Text('Starred messages')),
+                            if (!isConv) PopupMenuItem<String>(value: 'block', child: Text(iBlocked ? 'Unblock karo' : 'Block karo')),
+                            if (!isConv) const PopupMenuItem<String>(value: 'report', child: Text('Report karo')),
+                            const PopupMenuItem<String>(value: 'wall', child: Text('Wallpaper')),
+                          ],
+                          child: circ(Icons.more_vert),
+                        ),
                       ),
                     ]),
-                  ),
-                ),
-                if (comm) ibtn(Icons.groups, () => Navigator.push(context, MaterialPageRoute(builder: (_) => CommunityGroupsScreen(cv!)))),
-                ibtn(Icons.wallpaper, () => showWallpaper(context)),
-              ]),
             ),
+            if (disappear > 0)
+              Container(
+                width: double.infinity,
+                color: const Color(0xE0262323),
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Text('Disappearing messages on: ${disLabel(disappear)}', textAlign: TextAlign.center, style: const TextStyle(color: mist, fontSize: 12.5)),
+              ),
             Expanded(
               child: ListView.builder(
                 reverse: true,
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                itemCount: msgs.length,
-                itemBuilder: (_, i) => bubble(msgs[i]),
+                itemCount: shown.length,
+                itemBuilder: (_, i) => bubble(shown[i]),
               ),
             ),
             if (uploading) const LinearProgressIndicator(minHeight: 2, color: vanilla, backgroundColor: slate),
             if (replyTo != null && canPost) replyBar(),
-            canPost ? inputRow() : blockedBar(),
+            canPost ? (!isConv && iBlocked ? unblockBar() : inputRow()) : blockedBar(),
           ]),
         ),
       ),
