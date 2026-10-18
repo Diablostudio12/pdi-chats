@@ -68,4 +68,29 @@ APK=build/app/outputs/flutter-apk/app-release.apk
 } > /tmp/err.log 2>&1
 gh release delete build-log --cleanup-tag -y >/dev/null 2>&1 || true
 gh release create build-log --title "build log" --notes-file /tmp/err.log
+
+# Website (PWA) build -> pushed to branch web-build. Never fails the APK build.
+(
+  set +e
+  flutter create --platforms=web --project-name pdi_chats . > /tmp/web.log 2>&1
+  flutter build web --release >> /tmp/web.log 2>&1
+  if [ -f build/web/index.html ]; then
+    cd build/web || exit 0
+    touch .nojekyll
+    git init -q -b web-build
+    git config user.name "github-actions[bot]"
+    git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+    git add -A
+    git commit -q -m "Web build"
+    git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+    git push -q -f origin web-build
+    gh release delete web-log --cleanup-tag -y >/dev/null 2>&1
+    echo "web build ok" > /tmp/weblog.txt
+  else
+    tail -n 60 /tmp/web.log > /tmp/weblog.txt
+  fi
+  gh release delete web-log --cleanup-tag -y >/dev/null 2>&1
+  gh release create web-log --title "web log" --notes-file /tmp/weblog.txt
+) || true
+
 if [ $rc -ne 0 ]; then exit 1; fi
