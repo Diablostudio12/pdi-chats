@@ -88,6 +88,29 @@ void toast(BuildContext c, String m) {
 
 String errText(Object e) => e is PostgrestException ? e.message : 'Kuch gadbad hui, dobara try karo';
 
+// local cache so chats open instantly (shown first, refreshed from server after)
+class Cache {
+  static String _k(String k) => 'c_${sb.auth.currentUser?.id ?? 'x'}_$k';
+
+  static Future<List<Map<String, dynamic>>?> read(String k) async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      final s = p.getString(_k(k));
+      if (s == null) return null;
+      return List<Map<String, dynamic>>.from((jsonDecode(s) as List).map((e) => Map<String, dynamic>.from(e as Map)));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<void> write(String k, List<Map<String, dynamic>> v) async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setString(_k(k), jsonEncode(v));
+    } catch (_) {}
+  }
+}
+
 int roleRank(String r) {
   switch (r) {
     case 'owner':
@@ -547,6 +570,7 @@ class _HomeState extends State<HomeScreen> {
     super.initState();
     Live.start();
     touchPresence();
+    loadCache();
     load();
     Live.tick.addListener(load);
     t = Timer.periodic(const Duration(seconds: 20), (_) {
@@ -562,22 +586,46 @@ class _HomeState extends State<HomeScreen> {
     super.dispose();
   }
 
+  Future<void> loadCache() async {
+    final a = await Cache.read('home_chats');
+    final b = await Cache.read('home_convs');
+    if (!mounted) return;
+    setState(() {
+      if (chats.isEmpty && a != null) chats = a;
+      if (convs.isEmpty && b != null) convs = b;
+    });
+  }
+
   Future<void> load() async {
-    try {
-      await sb.rpc('mark_delivered');
-    } catch (_) {}
-    try {
-      final d = await sb.rpc('my_chats');
-      if (mounted) setState(() => chats = List<Map<String, dynamic>>.from((d as List).map((e) => Map<String, dynamic>.from(e))));
-    } catch (_) {}
-    try {
-      final d = await sb.rpc('my_convs');
-      if (mounted) setState(() => convs = List<Map<String, dynamic>>.from((d as List).map((e) => Map<String, dynamic>.from(e))));
-    } catch (_) {}
-    try {
-      final d = await sb.from('pinned_chats').select('chat_key');
-      if (mounted) setState(() => pinned = {for (final r in List<Map<String, dynamic>>.from(d)) r['chat_key'].toString()});
-    } catch (_) {}
+    Future(() async {
+      try {
+        await sb.rpc('mark_delivered');
+      } catch (_) {}
+    });
+    await Future.wait([
+      () async {
+        try {
+          final d = await sb.rpc('my_chats');
+          final l = List<Map<String, dynamic>>.from((d as List).map((e) => Map<String, dynamic>.from(e)));
+          if (mounted) setState(() => chats = l);
+          Cache.write('home_chats', l);
+        } catch (_) {}
+      }(),
+      () async {
+        try {
+          final d = await sb.rpc('my_convs');
+          final l = List<Map<String, dynamic>>.from((d as List).map((e) => Map<String, dynamic>.from(e)));
+          if (mounted) setState(() => convs = l);
+          Cache.write('home_convs', l);
+        } catch (_) {}
+      }(),
+      () async {
+        try {
+          final d = await sb.from('pinned_chats').select('chat_key');
+          if (mounted) setState(() => pinned = {for (final r in List<Map<String, dynamic>>.from(d)) r['chat_key'].toString()});
+        } catch (_) {}
+      }(),
+    ]);
   }
 
   Future<void> togglePin(String key) async {
@@ -1309,6 +1357,7 @@ class _ChatState extends State<ChatScreen> {
   int lastMarked = 0;
   int disappear = 0;
   bool removed = false;
+  bool loaded = false;
   bool iBlocked = false, searching = false, viewOnceMode = false;
   String q = '';
   final ctl = TextEditingController();
@@ -1323,6 +1372,7 @@ class _ChatState extends State<ChatScreen> {
   String get me => sb.auth.currentUser!.id;
   bool get isConv => cv != null;
   String get cid => cv!['id'].toString();
+  String get cacheKey => isConv ? 'm_$cid' : 'm_${widget.peerId}';
 
   bool get canPost {
     if (!isConv) return true;
@@ -1341,6 +1391,7 @@ class _ChatState extends State<ChatScreen> {
   void initState() {
     super.initState();
     cv = widget.conv == null ? null : Map<String, dynamic>.from(widget.conv!);
+    loadCache();
     load();
     loadPeople();
     loadMeta();
@@ -1379,6 +1430,11 @@ class _ChatState extends State<ChatScreen> {
     ctl.dispose();
     searchCtl.dispose();
     super.dispose();
+  }
+
+  Future<void> loadCache() async {
+    final c = await Cache.read(cacheKey);
+    if (c != null && mounted && msgs.isEmpty) setState(() => msgs = c);
   }
 
   Future<void> loadPeople() async {
@@ -1426,6 +1482,34 @@ class _ChatState extends State<ChatScreen> {
     } catch (_) {}
   }
 
+  Future<void> loadReacts(List<int> ids) async {
+    try {
+      final rs = await sb.from('message_reactions').select().inFilter('message_id', ids);
+      final rm = <int, Map<String, int>>{};
+      final mine = <int, String>{};
+      for (final r in List<Map<String, dynamic>>.from(rs)) {
+        final id = r['message_id'] as int;
+        final e = r['emoji'].toString();
+        rm.putIfAbsent(id, () => <String, int>{});
+        rm[id]![e] = (rm[id]![e] ?? 0) + 1;
+        if (r['user_id'] == me) mine[id] = e;
+      }
+      if (mounted) {
+        setState(() {
+          reacts = rm;
+          myReact = mine;
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<void> loadStars(List<int> ids) async {
+    try {
+      final ss = await sb.from('starred').select('message_id').inFilter('message_id', ids);
+      if (mounted) setState(() => stars = {for (final r in List<Map<String, dynamic>>.from(ss)) r['message_id'] as int});
+    } catch (_) {}
+  }
+
   Future<void> load() async {
     try {
       final q = sb.from('messages').select();
@@ -1433,32 +1517,15 @@ class _ChatState extends State<ChatScreen> {
               ? q.eq('conv_id', cid)
               : q.or('and(sender.eq.$me,receiver.eq.${widget.peerId}),and(sender.eq.${widget.peerId},receiver.eq.$me)'))
           .order('id', ascending: false)
-          .limit(300);
+          .limit(loaded ? 300 : 60);
       if (!mounted) return;
       final list = List<Map<String, dynamic>>.from(d);
+      loaded = true;
       setState(() => msgs = list);
+      Cache.write(cacheKey, list.take(40).toList());
       final ids = list.map((m) => m['id'] as int).toList();
       if (ids.isNotEmpty) {
-        final rs = await sb.from('message_reactions').select().inFilter('message_id', ids);
-        final rm = <int, Map<String, int>>{};
-        final mine = <int, String>{};
-        for (final r in List<Map<String, dynamic>>.from(rs)) {
-          final id = r['message_id'] as int;
-          final e = r['emoji'].toString();
-          rm.putIfAbsent(id, () => <String, int>{});
-          rm[id]![e] = (rm[id]![e] ?? 0) + 1;
-          if (r['user_id'] == me) mine[id] = e;
-        }
-        if (mounted) {
-          setState(() {
-            reacts = rm;
-            myReact = mine;
-          });
-        }
-        try {
-          final ss = await sb.from('starred').select('message_id').inFilter('message_id', ids);
-          if (mounted) setState(() => stars = {for (final r in List<Map<String, dynamic>>.from(ss)) r['message_id'] as int});
-        } catch (_) {}
+        await Future.wait([loadReacts(ids), loadStars(ids)]);
       }
       if (isConv) {
         if (list.isNotEmpty && (list.first['id'] as int) != lastMarked) {
